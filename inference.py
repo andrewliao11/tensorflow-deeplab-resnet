@@ -95,9 +95,10 @@ def main():
     im = Image.fromarray(msk[0])
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
-    im.save(args.save_dir + 'mask.png')
-    
-    print('The output file has been saved to {}'.format(args.save_dir + 'mask.png'))
+    image_name = args.img_path.split('/')[-1]
+    im.save(args.save_dir + 'mask.'+image_name+'.png')
+   
+    print('The output file has been saved to {}'.format(args.save_dir + 'mask.'+image_name+'.png'))
 
     
 if __name__ == '__main__':
