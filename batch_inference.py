@@ -18,22 +18,23 @@ import tensorflow as tf
 import numpy as np
 
 from deeplab_resnet import DeepLabResNetModel, ImageReader, decode_labels, inv_preprocess, prepare_label
+import ipdb
 
 IMG_MEAN = np.array((104.00698793,116.66876762,122.67891434), dtype=np.float32)
 
 BATCH_SIZE = 4
 DATA_DIRECTORY = ''
-DATA_LIST_PATH = './synthia_train.txt'
+DATA_LIST_PATH = './synthia_test.txt'
 IGNORE_LABEL = 255
 INPUT_SIZE = '256,256'
 LEARNING_RATE = 1e-4
 NUM_CLASSES = 11
 NUM_STEPS = 20000
 RANDOM_SEED = 1234
-RESTORE_FROM = './deeplab_resnet.ckpt'
+RESTORE_FROM = './snapshots_finetune/model.ckpt-14400'
 SAVE_NUM_IMAGES = 2
 SAVE_PRED_EVERY = 100
-SNAPSHOT_DIR = './snapshots_finetune/'
+SNAPSHOT_DIR = './inference/'
 
 def get_arguments():
     """Parse all the arguments provided from the CLI.
@@ -125,7 +126,8 @@ def main():
         image_batch, label_batch = reader.dequeue(args.batch_size)
 
     # Create network.
-    net = DeepLabResNetModel({'data': image_batch}, is_training=args.is_training, num_classes=args.num_classes)
+    #net = DeepLabResNetModel({'data': image_batch}, is_training=args.is_training, num_classes=args.num_classes)
+    net = DeepLabResNetModel({'data': image_batch}, is_training=False, num_classes=args.num_classes)
     # For a small batch size, it is better to keep
     # the statistics of the BN layers (running means and variances)
     # frozen, and to not update the values provided by the pre-trained model.
@@ -138,8 +140,6 @@ def main():
     # Which variables to load. Running means and variances are not trainable,
     # thus all_variables() should be restored.
     # Restore all variables, or all except the last ones.
-    restore_var = [v for v in tf.global_variables() if 'fc' not in v.name]
-    trainable = [v for v in tf.trainable_variables() if 'fc' in v.name] # Fine-tune only the last layers.
 
     prediction = tf.reshape(raw_output, [-1, args.num_classes])
     label_proc = prepare_label(label_batch, tf.stack(raw_output.get_shape()[1:3]), num_classes=args.num_classes)
@@ -154,22 +154,30 @@ def main():
     raw_output_up = tf.argmax(raw_output_up, dimension=3)
     pred = tf.expand_dims(raw_output_up, dim=3)
 
+    # Calculate IoU
+    mean_IoU = tf.metrics.mean_iou(labels=label_batch, predictions=pred, num_classes=args.num_classes)
+    mean_per_class_acc = tf.metrics.mean_per_class_accuracy(labels=label_batch,
+                                                            predictions=pred, num_classes=args.num_classes)
+    mean_acc = tf.metrics.accuracy(labels=label_batch, predictions=pred)
+
+
     # Image summary.
     images_summary = tf.py_func(inv_preprocess, [image_batch, args.save_num_images, IMG_MEAN], tf.uint8)
     labels_summary = tf.py_func(decode_labels, [label_batch, args.save_num_images, args.num_classes], tf.uint8)
     preds_summary = tf.py_func(decode_labels, [pred, args.save_num_images, args.num_classes], tf.uint8)
 
-    total_summary = tf.summary.image('images',
-                                     tf.concat(axis=2, values=[images_summary, labels_summary, preds_summary]),
-                                     max_outputs=args.save_num_images) # Concatenate row-wise.
-    loss_summary = tf.summary.scalar('training_loss', reduced_loss)
-    overall_summary = tf.summary.merge([total_summary, loss_summary])
-    summary_writer = tf.summary.FileWriter(args.snapshot_dir,
-                                           graph=tf.get_default_graph())
+    final_output = tf.concat(axis=2, values=[images_summary, labels_summary, preds_summary])
+    #total_summary = tf.summary.image('images',
+    #                                 tf.concat(axis=2, values=[images_summary, labels_summary, preds_summary]),
+    #                                 max_outputs=args.save_num_images) # Concatenate row-wise.
+    #loss_summary = tf.summary.scalar('training_loss', reduced_loss)
+    #overall_summary = tf.summary.merge([total_summary, loss_summary])
+    #summary_writer = tf.summary.FileWriter(args.snapshot_dir,
+    #                                       graph=tf.get_default_graph())
 
     # Define loss and optimisation parameters.
-    optimiser = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
-    optim = optimiser.minimize(reduced_loss, var_list=trainable)
+    #optimiser = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
+    #optim = optimiser.minimize(reduced_loss, var_list=trainable)
 
     # Set up tf session and initialize variables.
     config = tf.ConfigProto()
@@ -178,31 +186,40 @@ def main():
     init = tf.global_variables_initializer()
 
     sess.run(init)
-
+    sess.run(tf.local_variables_initializer())
     # Saver for storing checkpoints of the model.
     saver = tf.train.Saver(var_list=tf.global_variables(), max_to_keep=40)
-
+    saver.restore(sess, args.restore_from)
     # Load variables if the checkpoint is provided.
-    if args.restore_from is not None:
-        loader = tf.train.Saver(var_list=restore_var)
-        load(loader, sess, args.restore_from)
+    #if args.restore_from is not None:
+    #    loader = tf.train.Saver(var_list=restore_var)
+    #    load(loader, sess, args.restore_from)
 
     # Start queue threads.
     threads = tf.train.start_queue_runners(coord=coord, sess=sess)
 
+    start_time = time.time()
+    for step in range(25):
+        loss, IoU, per_class_acc, acc, output = sess.run([reduced_loss, mean_IoU,
+                                                      mean_per_class_acc, mean_acc, final_output])
+    ipdb.set_trace()
+    print (IoU, per_class_acc, acc)
+    '''
     # Iterate over training steps.
     for step in range(args.num_steps):
         start_time = time.time()
+        loss, image, overall_output = sess.run([reduced_loss, image_batch, final_output])
 
-        if step % args.save_pred_every == 0:
-            loss_value, images, labels, preds, summary, _ = sess.run([reduced_loss, image_batch, label_batch, pred, overall_summary, optim])
-            summary_writer.add_summary(summary, step)
-            save(saver, sess, args.snapshot_dir, step)
-        else:
-            loss_value, _, summary = sess.run([reduced_loss, optim, loss_summary])
-            summary_writer.add_summary(summary, step)
+        #if step % args.save_pred_every == 0:
+        #    loss_value, images, labels, preds, summary, _ = sess.run([reduced_loss, image_batch, label_batch, pred, overall_summary, optim])
+        #    summary_writer.add_summary(summary, step)
+        #    save(saver, sess, args.snapshot_dir, step)
+        #else:
+        #    loss_value, _, summary = sess.run([reduced_loss, optim, loss_summary])
+        #    summary_writer.add_summary(summary, step)
         duration = time.time() - start_time
-        print('step {:d} \t loss = {:.3f}, ({:.3f} sec/step)'.format(step, loss_value, duration))
+        #print('step {:d} \t loss = {:.3f}, ({:.3f} sec/step)'.format(step, loss_value, duration))
+    '''
     coord.request_stop()
     coord.join(threads)
 
