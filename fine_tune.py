@@ -32,7 +32,7 @@ NUM_STEPS = 20000
 RANDOM_SEED = 1234
 RESTORE_FROM = './deeplab_resnet.ckpt'
 SAVE_NUM_IMAGES = 2
-SAVE_PRED_EVERY = 100
+SAVE_PRED_EVERY = 200
 SNAPSHOT_DIR = './snapshots_finetune/'
 
 def get_arguments():
