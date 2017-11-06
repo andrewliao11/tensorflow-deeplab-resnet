@@ -11,11 +11,13 @@ from datetime import datetime
 import os
 import sys
 import time
+import ipdb
 
 import tensorflow as tf
 import numpy as np
+import scipy.misc
 
-from deeplab_resnet import DeepLabResNetModel, ImageReader, prepare_label
+from deeplab_resnet import DeepLabResNetModel, ImageReader, prepare_label, decode_labels
 
 IMG_MEAN = np.array((104.00698793,116.66876762,122.67891434), dtype=np.float32)
 
@@ -24,7 +26,7 @@ DATA_LIST_PATH = 'synthia_test.txt'
 IGNORE_LABEL = 255
 NUM_CLASSES = 11
 NUM_STEPS = 3817 # Number of images in the validation set.
-RESTORE_FROM = './snapshots_finetune/model.ckpt-800'
+RESTORE_FROM = './snapshots_finetune/model.ckpt-14400'
 
 def get_arguments():
     """Parse all the arguments provided from the CLI.
@@ -90,12 +92,15 @@ def main():
     raw_output = tf.image.resize_bilinear(raw_output, tf.shape(image_batch)[1:3,])
     raw_output = tf.argmax(raw_output, dimension=3)
     pred = tf.expand_dims(raw_output, dim=3) # Create 4-d tensor.
-
+    decode_pred = tf.py_func(decode_labels, [pred, 1, args.num_classes], tf.uint8)
     # mIoU
     pred = tf.reshape(pred, [-1,])
     gt = tf.reshape(label_batch, [-1,])
     weights = tf.cast(tf.less_equal(gt, args.num_classes - 1), tf.int32) # Ignoring all labels greater than or equal to n_classes.
-    mIoU, update_op = tf.contrib.metrics.streaming_mean_iou(pred, gt, num_classes=args.num_classes, weights=weights)
+    mIoU, IoU_update_op = tf.metrics.mean_iou(pred, gt, num_classes=args.num_classes, weights=weights)
+    pc_accuracy, pc_acc_update_op = tf.metrics.mean_per_class_accuracy(pred, gt, num_classes=args.num_classes, weights=weights)
+    accuracy, acc_update_op = tf.metrics.accuracy(pred, gt, weights=weights)
+
 
     # Set up tf session and initialize variables.
     config = tf.ConfigProto()
@@ -116,10 +121,14 @@ def main():
 
     # Iterate over training steps.
     for step in range(args.num_steps):
-        preds, _ = sess.run([pred, update_op])
+        preds, _, _, _, pred_img = sess.run([pred, IoU_update_op, acc_update_op, pc_acc_update_op, decode_pred])
+        pred_p = os.path.join('output', reader.image_list[step].split('/')[-1].replace('img', 'pred'))
+        scipy.misc.imsave(pred_p, pred_img[0])
         if step % 100 == 0:
             print('step {:d}'.format(step))
     print('Mean IoU: {:.3f}'.format(mIoU.eval(session=sess)))
+    print('Per-Class Accuracy:{:.3f}'.format(pc_accuracy.eval(session=sess)))
+    print('Accuracy: {:.3f}'.format(accuracy.eval(session=sess)))
     coord.request_stop()
     coord.join(threads)
 
